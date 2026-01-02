@@ -6,19 +6,19 @@ import logging
 from flask import Flask
 import threading
 
-# LOGI
+# ===== LOGI =====
 logging.basicConfig(level=logging.INFO)
 
-# ENV
+# ===== ENV =====
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# DISCORD
+# ===== DISCORD =====
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# FLASK (PORT DLA RENDER)
+# ===== FLASK (WYMAGANE DLA RENDER WEB SERVICE) =====
 app = Flask(__name__)
 
 @app.route("/")
@@ -26,19 +26,19 @@ def home():
     return "Bot działa"
 
 def run_web():
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 10000))  # <<< NAJWAŻNIEJSZE
+    app.run(host="0.0.0.0", port=port)
 
-# START FLASK W OSOBNYM WĄTKU
 threading.Thread(target=run_web).start()
 
-# READY
+# ===== READY =====
 @client.event
 async def on_ready():
-    guild = discord.Object(id=1410955423648845825)
+    guild = discord.Object(id=1410955423648845825)  # ID twojego serwera
     await tree.sync(guild=guild)
     logging.info(f"Zalogowano jako {client.user}")
 
-# KOMENDA
+# ===== KOMENDA =====
 @tree.command(
     name="rollbackstworz",
     description="Tworzy kanał rollback i wysyła instrukcję"
@@ -51,18 +51,16 @@ async def rollbackstworz(interaction: discord.Interaction):
             "Tworzycie rollbacka tylko z myślą o to, żeby polepszyć swoje "
             "umiejętności gry, razem z zarządem będziemy dokładnie analizować "
             "wysyłane przez was klipy i podpowiadać wam co mogliście zrobić "
-            "lepiej aby jak najszybciej progresować.\n\n"
-            "**Jak macie wysłać poprawnie klipa?**\n"
-            "Aby poprawnie wysłać klipa musicie wstawić całe nagranie "
-            "z np. MCL na swój stworzony za pomocą przycisku kanał wraz "
-            "z rozpisanymi timecodes – momenty gdzie był fight lub coś "
-            "ciekawego co uważacie, że jest do poprawy."
+            "lepiej.\n\n"
+            "**Jak wysłać klipa?**\n"
+            "Wrzuć całe nagranie (np. MCL) oraz timecodes z momentami fightów."
         ),
         color=0x7B3FE4
     )
 
     await interaction.response.send_message(embed=embed)
 
-# START BOTA
+# ===== START =====
 client.run(TOKEN)
+
 
