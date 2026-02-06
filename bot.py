@@ -13,31 +13,46 @@ logging.basicConfig(level=logging.INFO)
 
 # ====== ENV ======
 load_dotenv()
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))
+GUILD_ID = os.getenv("GUILD_ID")
 ROLLBACK_CATEGORY_NAME = os.getenv("ROLLBACK_CATEGORY_NAME", "Rollbacks")
 
-# ====== BOT ======
+if not TOKEN or not GUILD_ID:
+    raise RuntimeError("❌ Brak DISCORD_TOKEN lub GUILD_ID w ENV")
+
+GUILD_ID = int(GUILD_ID)
+
+# ====== INTENTS ======
 intents = discord.Intents.default()
+intents.message_content = True  # WAŻNE
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ====== FLASK (Render) ======
+# ====== FLASK (Render keep-alive) ======
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot działa"
+    return "Bot działa ✅"
 
 def run_web():
     app.run(host="0.0.0.0", port=8080)
 
-threading.Thread(target=run_web).start()
+threading.Thread(target=run_web, daemon=True).start()
 
 # ====== DANE ======
 DATA_FILE = "data/captures.json"
 
+def ensure_data():
+    os.makedirs("data", exist_ok=True)
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({"captures": {}}, f)
+
 def load_data():
+    ensure_data()
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -48,14 +63,12 @@ def save_data(data):
 # ====== READY ======
 @bot.event
 async def on_ready():
-    guild = discord.Object(id=GUILD_ID)
-    await tree.sync(guild=guild)
-    logging.info(f"Zalogowano jako {bot.user}")
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    logging.info(f"✅ Zalogowano jako {bot.user}")
 
 # =====================================================
 # ==================== CAPTURES =======================
 # =====================================================
-
 class CapturesView(discord.ui.View):
     def __init__(self, capt_id):
         super().__init__(timeout=None)
@@ -107,21 +120,21 @@ class CapturesView(discord.ui.View):
             ephemeral=True
         )
 
-# ====== KOMENDA /captures ======
-@tree.command(name="captures", description="Tworzy capt z zapisami", guild=discord.Object(id=GUILD_ID))
+# ====== /captures ======
+@tree.command(
+    name="captures",
+    description="Tworzy capt z zapisami",
+    guild=discord.Object(id=GUILD_ID)
+)
 @app_commands.describe(
     rodzina="Nazwa rodziny",
     godzina="Godzina (np. 20:00)",
     kwadrat="Kwadrat (np. G5)"
 )
-async def captures(
-    interaction: discord.Interaction,
-    rodzina: str,
-    godzina: str,
-    kwadrat: str
-):
-    data = load_data()
+async def captures(interaction: discord.Interaction, rodzina: str, godzina: str, kwadrat: str):
+    await interaction.response.defer()  # 🔴 BARDZO WAŻNE
 
+    data = load_data()
     capt_id = f"{rodzina}-{godzina}-{kwadrat}"
 
     data["captures"][capt_id] = {
@@ -143,7 +156,7 @@ async def captures(
         color=0x7B3FE4
     )
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=embed,
         view=CapturesView(capt_id)
     )
@@ -151,7 +164,6 @@ async def captures(
 # =====================================================
 # =================== ROLLBACK ========================
 # =====================================================
-
 class RollbackView(discord.ui.View):
     @discord.ui.button(label="🛠 Utwórz kanał", style=discord.ButtonStyle.primary)
     async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -181,16 +193,18 @@ class RollbackView(discord.ui.View):
             ephemeral=True
         )
 
-@tree.command(name="rollbackstworz", description="Tworzy rollback", guild=discord.Object(id=GUILD_ID))
+@tree.command(
+    name="rollbackstworz",
+    description="Tworzy rollback",
+    guild=discord.Object(id=GUILD_ID)
+)
 async def rollbackstworz(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🔧 Rollback",
-        description="Kliknij przycisk, aby utworzyć prywatny kanał rollback.",
-        color=0x7B3FE4
-    )
-
     await interaction.response.send_message(
-        embed=embed,
+        embed=discord.Embed(
+            title="🔧 Rollback",
+            description="Kliknij przycisk, aby utworzyć prywatny kanał rollback.",
+            color=0x7B3FE4
+        ),
         view=RollbackView()
     )
 
