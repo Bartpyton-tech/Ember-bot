@@ -8,21 +8,21 @@ from dotenv import load_dotenv
 from flask import Flask
 import threading
 
-# ================== LOGI ==================
+# ===== LOGI =====
 logging.basicConfig(level=logging.INFO)
 
-# ================== ENV ==================
+# ===== ENV =====
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID"))
 ROLLBACK_CATEGORY_NAME = os.getenv("ROLLBACK_CATEGORY_NAME", "Rollbacks")
 
-# ================== BOT ==================
+# ===== BOT =====
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ================== FLASK (RENDER) ==================
+# ===== FLASK (Render keep-alive) =====
 app = Flask(__name__)
 
 @app.route("/")
@@ -34,12 +34,13 @@ def run_web():
 
 threading.Thread(target=run_web, daemon=True).start()
 
-# ================== DANE ==================
+# ===== DANE =====
 DATA_DIR = "data"
-DATA_FILE = f"{DATA_DIR}/captures.json"
+DATA_FILE = "data/captures.json"
 
 def ensure_data():
-    os.makedirs(DATA_DIR, exist_ok=True)
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
     if not os.path.exists(DATA_FILE):
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump({"captures": {}}, f)
@@ -52,25 +53,25 @@ def load_data():
 def save_data(data):
     ensure_data()
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2)
 
-# ================== READY ==================
+# ===== READY =====
 @bot.event
 async def on_ready():
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    guild = discord.Object(id=GUILD_ID)
+    await tree.sync(guild=guild)
     logging.info(f"Zalogowano jako {bot.user}")
 
 # =====================================================
 # ===================== CAPTURES ======================
 # =====================================================
-MAX_MAIN = 25
 
 def build_embed(capt):
-    main = capt["main"]
-    reserve = capt["reserve"]
+    sklad = capt["sklad"]
+    rezerwa = capt["rezerwa"]
 
-    def fmt(lst):
-        return "\n".join(f"<@{u}>" for u in lst) if lst else "—"
+    def fmt(users):
+        return "\n".join(f"<@{u}>" for u in users) if users else "—"
 
     embed = discord.Embed(
         title="🚨 CAPT",
@@ -78,91 +79,119 @@ def build_embed(capt):
             f"👨‍👩‍👧 **Rodzina:** {capt['rodzina']}\n"
             f"🕒 **Godzina:** {capt['godzina']}\n"
             f"📍 **Kwadrat:** {capt['kwadrat']}\n\n"
-            f"🟢 **Skład główny ({len(main)}/{MAX_MAIN})**\n{fmt(main)}\n\n"
-            f"🟡 **Rezerwa ({len(reserve)})**\n{fmt(reserve)}"
+            f"🟢 **Skład ({len(sklad)}/25):**\n{fmt(sklad)}\n\n"
+            f"🟡 **Rezerwa:**\n{fmt(rezerwa)}"
         ),
         color=0x7B3FE4
     )
     return embed
+
+class SelectView(discord.ui.View):
+    def __init__(self, capt_id, users, role):
+        super().__init__(timeout=60)
+        self.capt_id = capt_id
+        self.users = users
+        self.role = role
+
+        options = [
+            discord.SelectOption(
+                label=str(i+1),
+                description=f"Użytkownik {uid}",
+                value=str(uid)
+            ) for i, uid in enumerate(users[:25])
+        ]
+
+        self.select = discord.ui.Select(
+            placeholder="Wybierz osoby",
+            min_values=1,
+            max_values=len(options),
+            options=options
+        )
+        self.select.callback = self.callback
+        self.add_item(self.select)
+
+    async def callback(self, interaction: discord.Interaction):
+        data = load_data()
+        capt = data["captures"][self.capt_id]
+
+        for uid in self.select.values:
+            uid = int(uid)
+            if self.role == "sklad" and uid not in capt["sklad"]:
+                if len(capt["sklad"]) < 25:
+                    capt["sklad"].append(uid)
+                    if uid in capt["rezerwa"]:
+                        capt["rezerwa"].remove(uid)
+            elif self.role == "rezerwa" and uid not in capt["rezerwa"]:
+                capt["rezerwa"].append(uid)
+                if uid in capt["sklad"]:
+                    capt["sklad"].remove(uid)
+
+        save_data(data)
+        await interaction.response.send_message("✅ Zaktualizowano", ephemeral=True)
 
 class CapturesView(discord.ui.View):
     def __init__(self, capt_id):
         super().__init__(timeout=None)
         self.capt_id = capt_id
 
-    async def update(self, interaction):
+    @discord.ui.button(label="✅ Zapisz się", style=discord.ButtonStyle.success)
+    async def zapisz(self, interaction: discord.Interaction, _):
         data = load_data()
         capt = data["captures"][self.capt_id]
+        uid = interaction.user.id
+
+        if uid in capt["users"]:
+            await interaction.response.send_message("Już zapisany", ephemeral=True)
+            return
+
+        capt["users"].append(uid)
+        save_data(data)
+
         await interaction.message.edit(embed=build_embed(capt), view=self)
+        await interaction.response.send_message("Zapisano", ephemeral=True)
 
-    @discord.ui.button(label="🟢 Skład", style=discord.ButtonStyle.success)
-    async def join_main(self, interaction: discord.Interaction, _):
+    @discord.ui.button(label="❌ Wypisz się", style=discord.ButtonStyle.danger)
+    async def wypisz(self, interaction: discord.Interaction, _):
+        data = load_data()
+        capt = data["captures"][self.capt_id]
+        uid = interaction.user.id
+
+        for lst in ["users", "sklad", "rezerwa"]:
+            if uid in capt[lst]:
+                capt[lst].remove(uid)
+
+        save_data(data)
+        await interaction.message.edit(embed=build_embed(capt), view=self)
+        await interaction.response.send_message("Wypisano", ephemeral=True)
+
+    @discord.ui.button(label="🎯 Wybierz skład", style=discord.ButtonStyle.primary)
+    async def wybierz(self, interaction: discord.Interaction, _):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Brak uprawnień", ephemeral=True)
+            return
+
         data = load_data()
         capt = data["captures"][self.capt_id]
 
-        if interaction.user.id in capt["main"]:
-            await interaction.response.send_message("❌ Już jesteś w składzie.", ephemeral=True)
-            return
+        await interaction.response.send_message(
+            "Najpierw **SKŁAD**, potem **REZERWA**",
+            view=SelectView(self.capt_id, capt["users"], "sklad"),
+            ephemeral=True
+        )
 
-        if len(capt["main"]) >= MAX_MAIN:
-            await interaction.response.send_message("❌ Skład pełny.", ephemeral=True)
-            return
-
-        if interaction.user.id in capt["reserve"]:
-            capt["reserve"].remove(interaction.user.id)
-
-        capt["main"].append(interaction.user.id)
-        save_data(data)
-        await interaction.response.defer()
-        await self.update(interaction)
-
-    @discord.ui.button(label="🟡 Rezerwa", style=discord.ButtonStyle.secondary)
-    async def join_reserve(self, interaction: discord.Interaction, _):
-        data = load_data()
-        capt = data["captures"][self.capt_id]
-
-        if interaction.user.id in capt["reserve"]:
-            await interaction.response.send_message("❌ Już jesteś w rezerwie.", ephemeral=True)
-            return
-
-        if interaction.user.id in capt["main"]:
-            capt["main"].remove(interaction.user.id)
-
-        capt["reserve"].append(interaction.user.id)
-        save_data(data)
-        await interaction.response.defer()
-        await self.update(interaction)
-
-    @discord.ui.button(label="❌ Wypisz", style=discord.ButtonStyle.danger)
-    async def leave(self, interaction: discord.Interaction, _):
-        data = load_data()
-        capt = data["captures"][self.capt_id]
-
-        if interaction.user.id in capt["main"]:
-            capt["main"].remove(interaction.user.id)
-        elif interaction.user.id in capt["reserve"]:
-            capt["reserve"].remove(interaction.user.id)
-        else:
-            await interaction.response.send_message("❌ Nie jesteś zapisany.", ephemeral=True)
-            return
-
-        save_data(data)
-        await interaction.response.defer()
-        await self.update(interaction)
-
-@tree.command(name="captures", description="Tworzy capt z wyborem składu", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="captures", description="Tworzy capt", guild=discord.Object(id=GUILD_ID))
 async def captures(interaction: discord.Interaction, rodzina: str, godzina: str, kwadrat: str):
     data = load_data()
-    capt_id = f"{rodzina}-{godzina}-{kwadrat}"
+    capt_id = f"{interaction.id}"
 
     data["captures"][capt_id] = {
         "rodzina": rodzina,
         "godzina": godzina,
         "kwadrat": kwadrat,
-        "main": [],
-        "reserve": []
+        "users": [],
+        "sklad": [],
+        "rezerwa": []
     }
-
     save_data(data)
 
     await interaction.response.send_message(
@@ -173,6 +202,7 @@ async def captures(interaction: discord.Interaction, rodzina: str, godzina: str,
 # =====================================================
 # ===================== ROLLBACK ======================
 # =====================================================
+
 class RollbackView(discord.ui.View):
     @discord.ui.button(label="🛠 Utwórz kanał", style=discord.ButtonStyle.primary)
     async def create(self, interaction: discord.Interaction, _):
@@ -184,7 +214,7 @@ class RollbackView(discord.ui.View):
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True),
+            interaction.user: discord.PermissionOverwrite(view_channel=True)
         }
 
         for role in guild.roles:
@@ -198,22 +228,23 @@ class RollbackView(discord.ui.View):
         )
 
         await interaction.response.send_message(
-            f"✅ Utworzono kanał {channel.mention}",
+            f"Utworzono {channel.mention}",
             ephemeral=True
         )
 
 @tree.command(name="rollbackstworz", description="Tworzy rollback", guild=discord.Object(id=GUILD_ID))
 async def rollbackstworz(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🔧 Rollback",
-        description="Kliknij przycisk, aby utworzyć prywatny kanał rollback.",
-        color=0x7B3FE4
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="🔧 Rollback",
+            description="Kliknij przycisk aby utworzyć kanał",
+            color=0x7B3FE4
+        ),
+        view=RollbackView()
     )
-    await interaction.response.send_message(embed=embed, view=RollbackView())
 
-# ================== START ==================
+# ===== START =====
 bot.run(TOKEN)
-
 
 
 
