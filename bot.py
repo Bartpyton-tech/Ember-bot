@@ -8,51 +8,41 @@ from dotenv import load_dotenv
 from flask import Flask
 import threading
 
-# ====== LOGI ======
+# ===== LOGI =====
 logging.basicConfig(level=logging.INFO)
 
-# ====== ENV ======
+# ===== ENV =====
 load_dotenv()
-
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = os.getenv("GUILD_ID")
+GUILD_ID = int(os.getenv("GUILD_ID"))
 ROLLBACK_CATEGORY_NAME = os.getenv("ROLLBACK_CATEGORY_NAME", "Rollbacks")
 
-if not TOKEN or not GUILD_ID:
-    raise RuntimeError("❌ Brak DISCORD_TOKEN lub GUILD_ID w ENV")
-
-GUILD_ID = int(GUILD_ID)
-
-# ====== INTENTS ======
+# ===== BOT =====
 intents = discord.Intents.default()
-intents.message_content = True  # WAŻNE
+intents.guilds = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ====== FLASK (Render keep-alive) ======
+# ===== FLASK (Render) =====
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot działa ✅"
+    return "Bot działa"
 
 def run_web():
     app.run(host="0.0.0.0", port=8080)
 
 threading.Thread(target=run_web, daemon=True).start()
 
-# ====== DANE ======
+# ===== DANE =====
 DATA_FILE = "data/captures.json"
 
-def ensure_data():
-    os.makedirs("data", exist_ok=True)
-    if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"captures": {}}, f)
-
 def load_data():
-    ensure_data()
+    if not os.path.exists(DATA_FILE):
+        return {"captures": {}}
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -60,15 +50,16 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# ====== READY ======
+# ===== READY =====
 @bot.event
 async def on_ready():
     await tree.sync(guild=discord.Object(id=GUILD_ID))
-    logging.info(f"✅ Zalogowano jako {bot.user}")
+    logging.info(f"Zalogowano jako {bot.user}")
 
 # =====================================================
 # ==================== CAPTURES =======================
 # =====================================================
+
 class CapturesView(discord.ui.View):
     def __init__(self, capt_id):
         super().__init__(timeout=None)
@@ -120,7 +111,41 @@ class CapturesView(discord.ui.View):
             ephemeral=True
         )
 
-# ====== /captures ======
+    @discord.ui.button(label="⚔️ Wybierz skład", style=discord.ButtonStyle.primary)
+    async def wybierz(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        capt = data["captures"][self.capt_id]
+
+        if capt["picked"] is not None:
+            await interaction.response.send_message(
+                "❌ Skład został już wybrany.",
+                ephemeral=True
+            )
+            return
+
+        if interaction.user.id not in capt["users"]:
+            await interaction.response.send_message(
+                "❌ Musisz być zapisany, aby pickować skład.",
+                ephemeral=True
+            )
+            return
+
+        capt["picked"] = interaction.user.id
+        save_data(data)
+
+        member = interaction.guild.get_member(interaction.user.id)
+
+        embed = interaction.message.embeds[0]
+        embed.add_field(
+            name="⚔️ PICKNIĘCI",
+            value=member.display_name if member else "Nieznany",
+            inline=False
+        )
+
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message("✅ Skład wybrany!", ephemeral=True)
+
+# ====== KOMENDA /captures ======
 @tree.command(
     name="captures",
     description="Tworzy capt z zapisami",
@@ -131,17 +156,22 @@ class CapturesView(discord.ui.View):
     godzina="Godzina (np. 20:00)",
     kwadrat="Kwadrat (np. G5)"
 )
-async def captures(interaction: discord.Interaction, rodzina: str, godzina: str, kwadrat: str):
-    await interaction.response.defer()  # 🔴 BARDZO WAŻNE
-
+async def captures(
+    interaction: discord.Interaction,
+    rodzina: str,
+    godzina: str,
+    kwadrat: str
+):
     data = load_data()
+
     capt_id = f"{rodzina}-{godzina}-{kwadrat}"
 
     data["captures"][capt_id] = {
         "rodzina": rodzina,
         "godzina": godzina,
         "kwadrat": kwadrat,
-        "users": []
+        "users": [],
+        "picked": None
     }
 
     save_data(data)
@@ -151,64 +181,18 @@ async def captures(interaction: discord.Interaction, rodzina: str, godzina: str,
         description=(
             f"👨‍👩‍👧 **Rodzina:** {rodzina}\n"
             f"🕒 **Godzina:** {godzina}\n"
-            f"📍 **Kwadrat:** {kwadrat}"
+            f"📍 **Kwadrat:** {kwadrat}\n\n"
+            f"⚔️ **PICKNIĘCI:** Brak"
         ),
         color=0x7B3FE4
     )
 
-    await interaction.followup.send(
+    await interaction.response.send_message(
         embed=embed,
         view=CapturesView(capt_id)
     )
 
-# =====================================================
-# =================== ROLLBACK ========================
-# =====================================================
-class RollbackView(discord.ui.View):
-    @discord.ui.button(label="🛠 Utwórz kanał", style=discord.ButtonStyle.primary)
-    async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-
-        category = discord.utils.get(guild.categories, name=ROLLBACK_CATEGORY_NAME)
-        if not category:
-            category = await guild.create_category(ROLLBACK_CATEGORY_NAME)
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True),
-        }
-
-        for role in guild.roles:
-            if role.permissions.administrator:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True)
-
-        channel = await guild.create_text_channel(
-            name=f"rollback-{interaction.user.name}",
-            category=category,
-            overwrites=overwrites
-        )
-
-        await interaction.response.send_message(
-            f"✅ Utworzono kanał {channel.mention}",
-            ephemeral=True
-        )
-
-@tree.command(
-    name="rollbackstworz",
-    description="Tworzy rollback",
-    guild=discord.Object(id=GUILD_ID)
-)
-async def rollbackstworz(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        embed=discord.Embed(
-            title="🔧 Rollback",
-            description="Kliknij przycisk, aby utworzyć prywatny kanał rollback.",
-            color=0x7B3FE4
-        ),
-        view=RollbackView()
-    )
-
-# ====== START ======
+# ===== START =====
 bot.run(TOKEN)
 
 
